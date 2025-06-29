@@ -1,6 +1,7 @@
 from scapy.all import conf, IFACES
-import struct
 import argparse
+import struct
+
 import scapy
 
 from new_is_always_better import unpack_frame
@@ -8,6 +9,7 @@ from new_is_always_better import unpack_frame
 ARP_PACKET_LEN = 60
 ARP_TYPE = b'\x08\x06'
 DEST_IP_INDEX = -4
+SRC_IP_INDEX = -1
 OPCODE_INDEX = 7
 ARP_REQUEST = 1
 ARP_REPLY = 2
@@ -29,15 +31,15 @@ def ip_to_bytes(ip_address: str) -> bytes:
     return bytes_ip
 
 
-def send_arp_request(ip: str) -> None:
+def send_arp_request(ip: str, sock: conf.L2socket, args: argparse.Namespace) -> None:
     """
     Sends an arp request to the IP entered
     :param ip: the ip address looked for.
+    :param sock: the socket.
+    :param args: the arguments from the command line.
     """
-    args = parse_arguments()
     iface = args.iface
     iface_mac = ''.join(scapy.all.get_if_hwaddr(iface).split(":"))
-    sock = conf.L2socket(iface=iface, promisc=True)
 
     # defining all the fields of the arp request packet
     destination = bytes.fromhex("ffffffffffff")
@@ -72,7 +74,7 @@ def add_padding(arp_request: bytes) -> bytes:
     return arp_request
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """
     Parses the arguments from the command line.
     :return: the arguments.
@@ -84,14 +86,14 @@ def parse_arguments():
     return args
 
 
-def send_arp_reply(dest_mac_address, ip_dest: str) -> None:
+def send_arp_reply(dest_mac_address: bytes, ip_dest: str, sock: conf.L2socket, args: argparse.Namespace) -> None:
     """
+    Sends an arp reply with the device's address.
     :param dest_mac_address: the mac address of the destination.
     :param ip_dest: the IP address of the destination.
-    Sends an arp reply with the device's address.
+    :param sock: the socket.
+    :param args: the arguments from the command line.
     """
-    args = parse_arguments()
-    sock = conf.L2socket(iface=args.iface, promisc=True)
     iface_mac = ''.join(scapy.all.get_if_hwaddr(args.iface).split(":"))
     destination = dest_mac_address
     source = bytes.fromhex(iface_mac)
@@ -112,7 +114,7 @@ def send_arp_reply(dest_mac_address, ip_dest: str) -> None:
     sock.send(arp_reply)
 
 
-def unpack_arp_request(recv: tuple):
+def unpack_arp_request(recv: tuple) -> tuple:
     """
     unpacks the arp request received.
     :param recv: the arp request.
@@ -121,26 +123,40 @@ def unpack_arp_request(recv: tuple):
     return struct.unpack(">6s6shhhBBh6s4s6s4s18s", recv[1])
 
 
-def respond_to_arp() -> None:
+def is_arp_request_for_me(request_fields: tuple, args: argparse.Namespace) -> bool:
+    """
+    Checks if the packet received is an ARP request for me.
+    :param request_fields: the fields of the arp request.
+    :param args: the arguments from the command line.
+    :return: True if the request was for my IP address, False otherwise.
+    """
+    if request_fields[OPCODE_INDEX] == ARP_REQUEST and request_fields[SRC_IP_INDEX] == ip_to_bytes(args.sender_ip):
+        return True
+    return False
+
+
+def respond_to_arp(sock: conf.L2socket, args: argparse.Namespace) -> None:
     """
     Always listening for ARP packets, if an ARP request was sent, sends an ARP reply back.
+    :param sock: the socket.
+    :param args: the arguments from the command line.
     """
     recv = None
-    args = parse_arguments()
-    sock = conf.L2socket(iface=args.iface, promisc=True)
     while True:
         while recv is None or recv == (None, None, None):
             recv = sock.recv_raw()
         dst_mac, src_mac, next_layer_type, payload = unpack_frame(recv)
         if next_layer_type == ARP_TYPE:
             request_fields = unpack_arp_request(recv)
-            if request_fields[OPCODE_INDEX] == ARP_REQUEST:
+            if is_arp_request_for_me(request_fields, args):
                 dest_ip = request_fields[DEST_IP_INDEX]
-                send_arp_reply(src_mac, dest_ip)
+                send_arp_reply(src_mac, dest_ip, sock, args)
 
 
-def main():
-    respond_to_arp()
+def main() -> None:
+    args = parse_arguments()
+    sock = conf.L2socket(iface=args.iface, promisc=True)
+    respond_to_arp(sock, args)
 
 
 if __name__ == "__main__":
