@@ -1,8 +1,21 @@
 from scapy.all import conf, IFACES
 import struct
 import argparse
+import scapy
+
+from new_is_always_better import unpack_frame
 
 ARP_PACKET_LEN = 60
+ARP_TYPE = b'\x08\x06'
+DEST_IP_INDEX = -4
+OPCODE_INDEX = 7
+ARP_REQUEST = 1
+ARP_REPLY = 2
+PROT_TYPE = 0x0806
+HARDWARE_TYPE = 1
+PROTOCOL_TYPE = 0x0800
+HARDWARE_LENGTH = 6
+PROTOCOL_LENGTH = 4
 
 
 def ip_to_bytes(ip_address: str) -> bytes:
@@ -23,21 +36,23 @@ def send_arp_request(ip: str) -> None:
     """
     args = parse_arguments()
     iface = args.iface
+    iface_mac = ''.join(scapy.all.get_if_hwaddr(iface).split(":"))
     sock = conf.L2socket(iface=iface, promisc=True)
+
     # defining all the fields of the arp request packet
     destination = bytes.fromhex("ffffffffffff")
-    source = bytes.fromhex(args.iface_mac)
-    prot_type = 0x0806
-    hardware_type = 1
-    protocol_type = 0x0800
-    hardware_length = 6
-    protocol_length = 4
-    operation = 1
-    sender_hardware_address = bytes.fromhex(args.iface_mac)
+    source = bytes.fromhex(iface_mac)
+    prot_type = PROT_TYPE
+    hardware_type = HARDWARE_TYPE
+    protocol_type = PROTOCOL_TYPE
+    hardware_length = HARDWARE_LENGTH
+    protocol_length = PROTOCOL_LENGTH
+    operation = ARP_REQUEST
+    sender_hardware_address = bytes.fromhex(iface_mac)
     sender_ip = ip_to_bytes(args.sender_ip)
     target_hardware_address = bytes.fromhex("ffffffffffff")
     target_protocol_address = ip_to_bytes(ip)
-    print("target: ", target_protocol_address)
+
     second_layer = struct.pack(f">6s6sh", destination, source, prot_type)
     arp_request = second_layer + struct.pack(">hhBBh6s4s6s4s", hardware_type, protocol_type, hardware_length,
                                              protocol_length, operation, sender_hardware_address, sender_ip,
@@ -58,16 +73,74 @@ def add_padding(arp_request: bytes) -> bytes:
 
 
 def parse_arguments():
+    """
+    Parses the arguments from the command line.
+    :return: the arguments.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('iface', type=str)
-    parser.add_argument('iface_mac', type=str)
     parser.add_argument('sender_ip', type=str)
     args = parser.parse_args()
     return args
 
 
+def send_arp_reply(dest_mac_address, ip_dest: str) -> None:
+    """
+    :param dest_mac_address: the mac address of the destination.
+    :param ip_dest: the IP address of the destination.
+    Sends an arp reply with the device's address.
+    """
+    args = parse_arguments()
+    sock = conf.L2socket(iface=args.iface, promisc=True)
+    iface_mac = ''.join(scapy.all.get_if_hwaddr(args.iface).split(":"))
+    destination = dest_mac_address
+    source = bytes.fromhex(iface_mac)
+    prot_type = PROT_TYPE
+    hardware_type = HARDWARE_TYPE
+    protocol_type = PROTOCOL_TYPE
+    hardware_length = HARDWARE_LENGTH
+    protocol_length = PROTOCOL_LENGTH
+    operation = ARP_REPLY
+    sender_hardware_address = bytes.fromhex(iface_mac)
+    sender_ip = ip_to_bytes(args.sender_ip)
+    target_hardware_address = dest_mac_address
+    target_protocol_address = ip_dest
+    second_layer = struct.pack(f">6s6sh", destination, source, prot_type)
+    arp_reply = second_layer + struct.pack(">hhBBh6s4s6s4s", hardware_type, protocol_type, hardware_length,
+                                           protocol_length, operation, sender_hardware_address, sender_ip,
+                                           target_hardware_address, target_protocol_address)
+    sock.send(arp_reply)
+
+
+def unpack_arp_request(recv: tuple):
+    """
+    unpacks the arp request received.
+    :param recv: the arp request.
+    :return:
+    """
+    return struct.unpack(">6s6shhhBBh6s4s6s4s18s", recv[1])
+
+
+def respond_to_arp() -> None:
+    """
+    Always listening for ARP packets, if an ARP request was sent, sends an ARP reply back.
+    """
+    recv = None
+    args = parse_arguments()
+    sock = conf.L2socket(iface=args.iface, promisc=True)
+    while True:
+        while recv is None or recv == (None, None, None):
+            recv = sock.recv_raw()
+        dst_mac, src_mac, next_layer_type, payload = unpack_frame(recv)
+        if next_layer_type == ARP_TYPE:
+            request_fields = unpack_arp_request(recv)
+            if request_fields[OPCODE_INDEX] == ARP_REQUEST:
+                dest_ip = request_fields[DEST_IP_INDEX]
+                send_arp_reply(src_mac, dest_ip)
+
+
 def main():
-    send_arp_request("192.168.68.100")
+    respond_to_arp()
 
 
 if __name__ == "__main__":
